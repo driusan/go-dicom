@@ -26,76 +26,86 @@ const (
 )
 
 // Parse a byte array, returns a DICOM file struct
-func (p *Parser) Parse(buff []byte) (*DicomFile, <-chan DicomMessage) {
-
-	c := make(chan DicomMessage)
-	waitMsg := make(chan bool)
-
-	buffer := newDicomBuffer(buff) //*di.Bytes)
+func (p *Parser) Parse(buff []byte) (*DicomFile, error) {
+	buffer := newDicomBuffer(buff)
 
 	buffer.Next(128) // skip preamble
 	buffer.p = +128
 
 	// check for magic word
-	if magicWord := string(buffer.Next(4)); magicWord != magic_word {
-		panic(ErrBrokenFile)
-	}
 	file := &DicomFile{}
 
-	go func() {
+	if magicWord := string(buffer.Next(4)); magicWord != magic_word {
+		// FIXME: This is stupid. It should have better logic to
+		// determine if it is, in fact, a DICOM when the magic bytes
+		// aren't there.
 
-		// (0002,0000) MetaElementGroupLength
-		metaElem := buffer.readDataElement(p)
-		metaLength := int(metaElem.Value[0].(uint32))
-		p.appendDataElement(file, metaElem)
+		buffer := newDicomBuffer(buff)
+		buffer.bo = binary.LittleEndian
+		buffer.implicit = true
 
-		// Read meta tags
-		start := buffer.Len()
-		for start-buffer.Len() < metaLength {
-			elem := buffer.readDataElement(p)
-			p.appendDataElement(file, elem)
-			c <- DicomMessage{elem, waitMsg}
-			<-waitMsg
-		}
-
-		// read endianness and explicit VR
-		endianess, implicit, err := file.getTransferSyntax()
-		if err != nil {
-			panic(ErrBrokenFile)
-		}
-
-		// modify buffer according to new TransferSyntaxUID
-		buffer.bo = endianess
-		buffer.implicit = implicit
-
-		// Start with image meta data
+		//return nil, ErrBrokenFile
 		for buffer.Len() != 0 {
-
-			elem := buffer.readDataElement(p)
+			elem, err := buffer.readDataElement(p)
+			if err != nil {
+				return nil, err
+			}
 			p.appendDataElement(file, elem)
-			c <- DicomMessage{elem, waitMsg}
-			<-waitMsg
+		}
+		return file, nil
+	}
 
+	// (0002,0000) MetaElementGroupLength
+	metaElem, err := buffer.readDataElement(p)
+	if err != nil {
+		return nil, err
+	}
+	metaLength := int(metaElem.Value[0].(uint32))
+	p.appendDataElement(file, metaElem)
+
+	// Read meta tags
+	start := buffer.Len()
+	for start-buffer.Len() < metaLength {
+		elem, err := buffer.readDataElement(p)
+		if err != nil {
+			return nil, err
+		}
+		p.appendDataElement(file, elem)
+	}
+
+	// read endianness and explicit VR
+	endianess, implicit, err := file.getTransferSyntax()
+	if err != nil {
+		return nil, err
+	}
+
+	// modify buffer according to new TransferSyntaxUID
+	buffer.bo = endianess
+	buffer.implicit = implicit
+
+	// Start with image meta data
+	for buffer.Len() != 0 {
+		elem, err := buffer.readDataElement(p)
+		if err != nil {
+			return nil, err
+		}
+		p.appendDataElement(file, elem)
+
+		/*
 			if elem.Vr == "SQ" {
-				p.readItems(file, buffer, elem, c)
+				p.readItems(file, buffer, elem)
 			}
 
 			if elem.Name == "PixelData" {
-				p.readPixelItems(file, buffer, elem, c)
+				p.readPixelItems(file, buffer, elem)
 				break
 			}
-
-		}
-
-		close(c)
-	}()
-
-	return file, c
+		*/
+	}
+	return file, nil
 }
 
-func (p *Parser) readItems(file *DicomFile, buffer *dicomBuffer, sq *DicomElement, c chan DicomMessage) (uint32, error) {
-	waitMsg := make(chan bool)
-
+func (p *Parser) readItems(file *DicomFile, buffer *dicomBuffer, sq *DicomElement) (uint32, error) {
 	sq.IndentLevel++
 	sqLength := sq.Vl
 
@@ -103,7 +113,10 @@ func (p *Parser) readItems(file *DicomFile, buffer *dicomBuffer, sq *DicomElemen
 		return 0, nil
 	}
 
-	elem := buffer.readDataElement(p)
+	elem, err := buffer.readDataElement(p)
+	if err != nil {
+		return 0, err
+	}
 	elem.IndentLevel = sq.IndentLevel
 
 	sqAcum := elem.elemLen
@@ -115,11 +128,9 @@ func (p *Parser) readItems(file *DicomFile, buffer *dicomBuffer, sq *DicomElemen
 			for buffer.Len() != 0 {
 
 				p.appendDataElement(file, elem)
-				c <- DicomMessage{elem, waitMsg}
-				<-waitMsg
 
 				if elem.Vr == "SQ" {
-					l, _ := p.readItems(file, buffer, elem, c)
+					l, _ := p.readItems(file, buffer, elem)
 					sqAcum += l
 				}
 
@@ -131,7 +142,10 @@ func (p *Parser) readItems(file *DicomFile, buffer *dicomBuffer, sq *DicomElemen
 					break
 				}
 
-				elem = buffer.readDataElement(p)
+				elem, err = buffer.readDataElement(p)
+				if err != nil {
+					return 0, err
+				}
 				elem.IndentLevel = sq.IndentLevel
 				if elem.Name == "Item" {
 					itemLength = elem.Vl
@@ -146,7 +160,7 @@ func (p *Parser) readItems(file *DicomFile, buffer *dicomBuffer, sq *DicomElemen
 			for buffer.Len() != 0 {
 
 				if elem.Vr == "SQ" {
-					p.readItems(file, buffer, elem, c)
+					p.readItems(file, buffer, elem)
 				}
 
 				if elem.Name == "SequenceDelimitationItem" {
@@ -154,10 +168,11 @@ func (p *Parser) readItems(file *DicomFile, buffer *dicomBuffer, sq *DicomElemen
 				}
 
 				p.appendDataElement(file, elem)
-				c <- DicomMessage{elem, waitMsg}
-				<-waitMsg
 
-				elem = buffer.readDataElement(p)
+				elem, err = buffer.readDataElement(p)
+				if err != nil {
+					return 0, err
+				}
 				elem.IndentLevel = sq.IndentLevel
 
 			}
@@ -170,9 +185,8 @@ func (p *Parser) readItems(file *DicomFile, buffer *dicomBuffer, sq *DicomElemen
 
 }
 
-func (p *Parser) readPixelItems(file *DicomFile, buffer *dicomBuffer, sq *DicomElement, c chan DicomMessage) {
-	waitMsg := make(chan bool)
-
+/*
+func (p *Parser) readPixelItems(file *DicomFile, buffer *dicomBuffer, sq *DicomElement) {
 	elem := buffer.readDataElement(p)
 
 	for buffer.Len() != 0 {
@@ -180,16 +194,12 @@ func (p *Parser) readPixelItems(file *DicomFile, buffer *dicomBuffer, sq *DicomE
 			elem.Value = append(elem.Value, buffer.readUInt8Array(elem.Vl))
 		}
 		p.appendDataElement(file, elem)
-		c <- DicomMessage{elem, waitMsg}
-		<-waitMsg
 		elem = buffer.readDataElement(p)
 
 	}
 	p.appendDataElement(file, elem)
-	c <- DicomMessage{elem, waitMsg}
-	<-waitMsg
-
 }
+*/
 
 // Append a dataElement to the DicomFile
 func (p *Parser) appendDataElement(file *DicomFile, elem *DicomElement) {
@@ -199,7 +209,6 @@ func (p *Parser) appendDataElement(file *DicomFile, elem *DicomElement) {
 
 // Finds the SyntaxTrasnferUID and returns the endianess and implicit VR for the file
 func (file *DicomFile) getTransferSyntax() (binary.ByteOrder, bool, error) {
-
 	var err error
 
 	elem, err := file.LookupElement("TransferSyntaxUID")
@@ -225,7 +234,6 @@ func (file *DicomFile) getTransferSyntax() (binary.ByteOrder, bool, error) {
 
 // Lookup a tag by name
 func (file *DicomFile) LookupElement(name string) (*DicomElement, error) {
-
 	for _, elem := range file.Elements {
 		if elem.Name == name {
 			return &elem, nil

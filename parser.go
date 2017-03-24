@@ -54,6 +54,16 @@ func (e *DicomElement) String() string {
 	return fmt.Sprintf("%08d %s (%04X, %04X) %s %s %d %s %s", e.P, s, e.Group, e.Element, e.Vr, sVl, e.elemLen, e.Name, sv)
 }
 
+func (e *DicomElement) GetValue() string {
+	v := fmt.Sprintf("%v", e.Value)
+	if len(v) > 2 {
+		if v[0] == '[' && v[len(v)-1] == ']' {
+			return strings.TrimSuffix(strings.TrimPrefix(v, "["), "]")
+		}
+	}
+	return v
+}
+
 // Return the tag as a string to use in the Dicom dictionary
 func (e *DicomElement) getTag() string {
 	return fmt.Sprintf("(%04X,%04X)", e.Group, e.Element)
@@ -62,30 +72,25 @@ func (e *DicomElement) getTag() string {
 // Create a new parser, with functional options for configuration
 // http://dave.cheney.net/2014/10/17/functional-options-for-friendly-apis
 func NewParser(options ...func(*Parser) error) (*Parser, error) {
-
 	p := Parser{}
 
 	// apply defaults
 	dict := bytes.NewReader([]byte(dicomDictData))
-	err := Dictionary(dict)(&p)
-
-	if err != nil {
-		panic(err)
+	if err := Dictionary(dict)(&p); err != nil {
+		return nil, err
 	}
 
 	// override defaults
 	for _, option := range options {
-		err := option(&p)
-		if err != nil {
-			panic(err)
+		if err := option(&p); err != nil {
+			return nil, err
 		}
 	}
-
 	return &p, nil
 }
 
 // Read a DICOM data element
-func (buffer *dicomBuffer) readDataElement(p *Parser) *DicomElement {
+func (buffer *dicomBuffer) readDataElement(p *Parser) (*DicomElement, error) {
 
 	implicit := buffer.implicit
 	inip := buffer.p
@@ -100,10 +105,17 @@ func (buffer *dicomBuffer) readDataElement(p *Parser) *DicomElement {
 		implicit = true
 	}
 
+	var err error
 	if implicit {
-		vr, vl = buffer.readImplicit(elem, p)
+		vr, vl, err = buffer.readImplicit(elem, p)
+		if err != nil {
+			return nil, err
+		}
 	} else {
-		vr, vl = buffer.readExplicit(elem)
+		vr, vl, err = buffer.readExplicit(elem)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	elem.Vr = vr
@@ -166,5 +178,5 @@ func (buffer *dicomBuffer) readDataElement(p *Parser) *DicomElement {
 	elem.Value = data
 	elem.elemLen = buffer.p - inip
 
-	return elem
+	return elem, nil
 }

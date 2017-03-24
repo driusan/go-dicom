@@ -20,18 +20,15 @@ const (
 )
 
 // generator
-func (di *DicomFile) Parse(buff []byte) <-chan DicomMessage {
+func (di *DicomFile) Parse(buff []byte) error {
 
 	parser, err := NewParser()
 	if err != nil {
-		panic(err)
+		return err
 	}
 
-	_, c := parser.Parse(buff)
-	if err != nil {
-		panic(err)
-	}
-	return c
+	_, err = parser.Parse(buff)
+	return err
 }
 
 // Discard messages
